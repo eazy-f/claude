@@ -1,44 +1,54 @@
 -module(claude_generator).
 
--export([load_from_files/1, load_ec2/1]).
+-export([load_from_files/1, load_latest/2, load_service_from_files/3]).
+
+load_latest(ServiceName, DefinitionsDirpath) ->
+    [Latest | _] = list_api_verions(ServiceName, DefinitionsDirpath),
+    load_service_from_files(ServiceName, Latest, DefinitionsDirpath).
+
+list_api_verions(ServiceName, DefinitionsDirpath) ->
+    ServiceHome = filename:join([DefinitionsDirpath, ServiceName]),
+    {ok, ApiList} = file:list_dir(ServiceHome),
+    lists:reverse(lists:sort(ApiList)).
 
 load_from_files(DefinitionsDirpath) ->
-    load_ec2(DefinitionsDirpath),
+    load_service_from_files("ec2", "2016-09-15", DefinitionsDirpath),
     ok.
 
-load_ec2(DefinitionsDirpath) ->
-    Filename = filename:join([DefinitionsDirpath, "ec2", "2016-09-15", "service-2.json"]),
+load_service_from_files(ServiceName, ApiVersion, DefinitionsDirpath) ->
+    Filename = filename:join([DefinitionsDirpath, ServiceName,
+                              ApiVersion, "service-2.json"]),
     {ok, Content} = file:read_file(Filename),
     Ec2Definition = jiffy:decode(Content, [return_maps]),
-    {Module, Code} = generate_code(Ec2Definition),
-    code:load_binary(Module, Filename, Code).
+    ModuleName = make_module_name(ServiceName, ApiVersion),
+    {Module, Code} = generate_code(ModuleName, Ec2Definition),
+    {module, _} = code:load_binary(Module, Filename, Code),
+    Module.
 
-generate_code(ApiDefinitions) ->
-    AST = generate_module(ApiDefinitions),
+generate_code(ModuleName, ApiDefinitions) ->
+    AST = generate_module(ModuleName, ApiDefinitions),
     {ok, Module, Binary} = compile:forms(erl_syntax:revert_forms(AST)),
     {Module, Binary}.
 
-generate_module(ApiDefinitions) ->
+generate_module(ModuleName, ApiDefinitions) ->
     ApiOperations = operation_functions(ApiDefinitions),
     Exports = exports(ApiOperations),
     Functions = ApiOperations,
-    erl_syntax:form_list([module_name(ApiDefinitions), Exports | Functions]).
+    erl_syntax:form_list([module_name(ModuleName), Exports | Functions]).
 
-module_name(ApiDefinitions) ->
-    #{
-       <<"metadata">> := #{
-         <<"endpointPrefix">> := EndpointName
-        }
-     } = ApiDefinitions,
+make_module_name(ServiceName, ApiVersion) ->
     NamePrefix = "claude",
     NameSuffix = "client_generated",
-    ModuleName = list_to_atom(string:join([NamePrefix, binary_to_list(EndpointName), NameSuffix], "_")),
+    NameParts = [NamePrefix, ServiceName, ApiVersion, NameSuffix],
+    list_to_atom(string:join(NameParts, "_")).
+
+module_name(ModuleName) ->
     erl_syntax:attribute(erl_syntax:atom(module), [erl_syntax:atom(ModuleName)]).
 
 operation_functions(#{<<"operations">> := Operations} = ApiDefinitions) ->
     OperationDefinitions = maps:values(Operations),
-    #{<<"shapes">> := Shapes} = ApiDefinitions,
-    [operation_function(Op, Shapes) || Op <- OperationDefinitions].
+    #{<<"shapes">> := Shapes, <<"metadata">> := Metadata} = ApiDefinitions,
+    [operation_function(Op, Metadata, Shapes) || Op <- OperationDefinitions].
 
 claude_name(CamelCaseBin) ->
     Words = camel_parts(binary_to_list(CamelCaseBin)),
@@ -61,7 +71,7 @@ http_method(Method) when Method == <<"POST">>;
                          Method == <<"PUT">> ->
     binary_to_atom(Method, latin1).
 
-operation_function(Operation, Shapes) ->
+operation_function(Operation, Metadata, Shapes) ->
     Output = maps:get(<<"output">>, Operation, undefined),
     #{<<"name">> := Name,
       <<"input">> := InputShape,
@@ -69,16 +79,28 @@ operation_function(Operation, Shapes) ->
         <<"method">> := Method,
         <<"requestUri">> := Uri
     }} = Operation,
+    #{<<"protocol">> := Protocol} = Metadata,
     FunctionName = erl_syntax:atom(list_to_atom(claude_name(Name))),
     Args = [erl_syntax:variable('Client'), erl_syntax:variable('Parameters')],
-    CallClient = erl_syntax:application(erl_syntax:atom(claude_client),
-                                        erl_syntax:atom(request),
-                                        [erl_syntax:abstract(http_method(Method)),
-                                         erl_syntax:abstract(Uri),
-                                         erl_syntax:variable('Client'),
-                                         erl_syntax:variable('ParsedParameters')]),
+    GetUrl = erl_syntax:application(
+              erl_syntax:atom(claude_client),
+              erl_syntax:atom(get_url),
+              [erl_syntax:abstract(Metadata),
+               erl_syntax:variable('Client')]),
+    CallClient = erl_syntax:application(
+                   erl_syntax:atom(claude_client),
+                   erl_syntax:atom(request),
+                   [erl_syntax:atom(binary_to_atom(Protocol, latin1)),
+                    erl_syntax:abstract(http_method(Method)),
+                    erl_syntax:variable('Url'),
+                    erl_syntax:abstract(Uri),
+                    erl_syntax:variable('Client'),
+                    erl_syntax:variable('ParsedParameters')]),
     ParseParameters = parameters_parser(InputShape, Shapes),
     FunctionBody = [erl_syntax:match_expr(
+                      erl_syntax:variable('Url'),
+                      GetUrl),
+                    erl_syntax:match_expr(
                       erl_syntax:variable('Parser'),
                       ParseParameters),
                     erl_syntax:match_expr(
@@ -147,7 +169,14 @@ parameters_parser(Definition, Shapes) ->
                              [erl_syntax:variable(VarString)]),
                             [return_var(VarString)]),
             erl_syntax:fun_expr([EntryClause, EntryFail]);
-        _ ->
+        <<"boolean">> ->
+            value_transformer(is_boolean, atom_to_list, ShapeName);
+        Integer when Integer == <<"integer">>; Integer == <<"long">> ->
+            value_transformer(is_integer, integer_to_list, ShapeName);
+        Float when Float == <<"float">>; Float == <<"double">> ->
+            value_transformer(is_float, float_to_list, ShapeName);
+        NotImplemented ->
+            io:format("not implemented type: ~p~n", [NotImplemented]),
             erl_syntax:fun_expr(
               [erl_syntax:clause(
                 [erl_syntax:variable('_')],
@@ -155,6 +184,21 @@ parameters_parser(Definition, Shapes) ->
                 [erl_syntax:abstract({value, "undefined"})]),
               fail_clause({unexpected_type, ShapeType})])
     end.
+
+value_transformer(Guard, Transformer, ShapeName) ->
+    Var = prefix_var("Var", binary_to_list(ShapeName)),
+    EntryClause = erl_syntax:clause(
+                    [erl_syntax:variable(Var)],
+                    erl_syntax:application(
+                      erl_syntax:atom(Guard),
+                      [erl_syntax:variable(Var)]),
+                    [erl_syntax:tuple(
+                       [erl_syntax:atom(value),
+                        erl_syntax:application(
+                          erl_syntax:atom(Transformer),
+                          [erl_syntax:variable(Var)])])]),
+    FailClause = fail_clause({unexpected_type, ShapeName}),
+    erl_syntax:fun_expr([EntryClause, FailClause]).
 
 return_var(VarName) ->
     erl_syntax:tuple([erl_syntax:atom(value), erl_syntax:variable(VarName)]).

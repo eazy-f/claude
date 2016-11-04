@@ -15,7 +15,7 @@
 %%====================================================================
 
 start(_StartType, _StartArgs) ->
-    Definitions = filename:join([code:priv_dir(claude), "aws_api"]),
+    Definitions = claude:definitions_dirpath(),
     ok = claude_generator:load_from_files(Definitions),
     claude_sup:start_link().
 
