@@ -81,6 +81,7 @@ operation_function(Operation, Metadata, Shapes) ->
     }} = Operation,
     #{<<"protocol">> := Protocol} = Metadata,
     FunctionName = erl_syntax:atom(list_to_atom(claude_name(Name))),
+    StaticParameters = #{<<"Action">> => {value, Name}},
     Args = [erl_syntax:variable('Client'), erl_syntax:variable('Parameters')],
     GetUrl = erl_syntax:application(
               erl_syntax:atom(claude_client),
@@ -95,7 +96,7 @@ operation_function(Operation, Metadata, Shapes) ->
                     erl_syntax:variable('Url'),
                     erl_syntax:abstract(Uri),
                     erl_syntax:variable('Client'),
-                    erl_syntax:variable('ParsedParameters')]),
+                    erl_syntax:variable('MergedParameters')]),
     ParseParameters = parameters_parser(InputShape, Shapes),
     FunctionBody = [erl_syntax:match_expr(
                       erl_syntax:variable('Url'),
@@ -108,6 +109,13 @@ operation_function(Operation, Metadata, Shapes) ->
                       erl_syntax:application(
                        erl_syntax:variable('Parser'),
                        [erl_syntax:variable('Parameters')])),
+		    erl_syntax:match_expr(
+                      erl_syntax:variable('MergedParameters'),
+                      erl_syntax:application(
+                       erl_syntax:atom(maps),
+                       erl_syntax:atom(merge),
+                       [erl_syntax:variable('ParsedParameters'),
+			erl_syntax:abstract(StaticParameters)])),
                     CallClient],
     erl_syntax:function(FunctionName, [erl_syntax:clause(Args, none, FunctionBody)]).
     
