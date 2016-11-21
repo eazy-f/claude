@@ -2,6 +2,8 @@
 
 -export([load_from_files/1, load_latest/2, load_service_from_files/3]).
 
+-include_lib("hackney/include/hackney_lib.hrl").
+
 load_latest(ServiceName, DefinitionsDirpath) ->
     [Latest | _] = list_api_verions(ServiceName, DefinitionsDirpath),
     load_service_from_files(ServiceName, Latest, DefinitionsDirpath).
@@ -69,7 +71,7 @@ http_method(Method) when Method == <<"POST">>;
                          Method == <<"GET">>;
                          Method == <<"DELETE">>;
                          Method == <<"PUT">> ->
-    binary_to_atom(Method, latin1).
+    list_to_atom(string:to_lower(binary_to_list(Method))).
 
 operation_function(Operation, Metadata, Shapes) ->
     Output = maps:get(<<"output">>, Operation, undefined),
@@ -79,9 +81,14 @@ operation_function(Operation, Metadata, Shapes) ->
         <<"method">> := Method,
         <<"requestUri">> := Uri
     }} = Operation,
-    #{<<"protocol">> := Protocol} = Metadata,
+    #{<<"protocol">> := Protocol,
+      <<"endpointPrefix">> := EndpointPrefix} = Metadata,
     FunctionName = erl_syntax:atom(list_to_atom(claude_name(Name))),
-    StaticParameters = #{<<"Action">> => {value, Name}},
+    ParsedUri = hackney_url:parse_url(<<"http://example.com", Uri/binary>>),
+    UriParameters = maps:from_list(hackney_url:parse_qs(ParsedUri#hackney_url.qs)),
+    UriPath = ParsedUri#hackney_url.path,
+    StaticParameters = UriParameters#{<<"Action">> => {value, Name}},
+    Scope = maps:get(<<"signingName">>, Metadata, EndpointPrefix),
     Args = [erl_syntax:variable('Client'), erl_syntax:variable('Parameters')],
     GetUrl = erl_syntax:application(
               erl_syntax:atom(claude_client),
@@ -92,9 +99,10 @@ operation_function(Operation, Metadata, Shapes) ->
                    erl_syntax:atom(claude_client),
                    erl_syntax:atom(request),
                    [erl_syntax:atom(binary_to_atom(Protocol, latin1)),
+                    erl_syntax:abstract(Scope),
                     erl_syntax:abstract(http_method(Method)),
-                    erl_syntax:variable('Url'),
-                    erl_syntax:abstract(Uri),
+                    binary_concat([erl_syntax:variable('Url'),
+                                   erl_syntax:abstract(UriPath)]),
                     erl_syntax:variable('Client'),
                     erl_syntax:variable('MergedParameters')]),
     ParseParameters = parameters_parser(InputShape, Shapes),
@@ -109,16 +117,16 @@ operation_function(Operation, Metadata, Shapes) ->
                       erl_syntax:application(
                        erl_syntax:variable('Parser'),
                        [erl_syntax:variable('Parameters')])),
-		    erl_syntax:match_expr(
+                    erl_syntax:match_expr(
                       erl_syntax:variable('MergedParameters'),
                       erl_syntax:application(
                        erl_syntax:atom(maps),
                        erl_syntax:atom(merge),
                        [erl_syntax:variable('ParsedParameters'),
-			erl_syntax:abstract(StaticParameters)])),
+                        erl_syntax:abstract(StaticParameters)])),
                     CallClient],
     erl_syntax:function(FunctionName, [erl_syntax:clause(Args, none, FunctionBody)]).
-    
+
 exports(ExportedFunctions) ->
     ExportList = [erl_syntax:arity_qualifier(erl_syntax:function_name(Fun),
                                              erl_syntax:integer(erl_syntax:function_arity(Fun)))
@@ -245,3 +253,8 @@ struct_member_key(_OriginalName, #{<<"locationName">> := LocationName}) ->
     binary_to_list(LocationName);
 struct_member_key(OriginalName, _Definition) ->
     binary_to_list(OriginalName).
+
+binary_concat(BinaryList) ->
+    Forms = [erl_syntax:binary_field(Body, [erl_syntax:atom(binary)]) 
+             || Body <- BinaryList],
+    erl_syntax:binary(Forms).
