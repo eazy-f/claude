@@ -36,7 +36,7 @@ sign_headers(Scope, MethodAtom, Url, Headers, Body, Client) ->
     #hackney_url{path = Uri, qs = QueryString} = Url,
     Method = list_to_binary(string:to_upper(atom_to_list(MethodAtom))),
     aws_signature:v4(AccessKeyId, SecretAccessKey, Scope, Region,
-		     Method, Uri, QueryString, Headers, Body).
+                     Method, Uri, QueryString, Headers, Body).
 
 parameters_to_query_params(Parameters) when is_list(Parameters);
                                             is_map(Parameters) ->

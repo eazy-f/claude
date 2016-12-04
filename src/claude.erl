@@ -13,11 +13,11 @@ client(Session, Options) ->
 
 api(ServiceName) ->
     claude_generator:load_latest(atom_to_list(ServiceName),
-				 definitions_dirpath()).
+                                 definitions_dirpath()).
 
 api(ServiceName, Version) ->
     claude_generator:load_latest(atom_to_list(ServiceName),
-				 Version).
+                                 Version).
 
 definitions_dirpath() ->
     filename:join([code:priv_dir(claude), "aws_api"]).

@@ -11,18 +11,18 @@ v4(AccessKeyId, SecretAccessKey, Scope, Region,
     StampedHeaders = stamp_headers(LongDate, Headers),
     {CanonicalHeaders, SignedHeaders} = canonical_headers(StampedHeaders),
     Request = canonical_request(Method, Uri, QueryString,
-				CanonicalHeaders, SignedHeaders,
+                                CanonicalHeaders, SignedHeaders,
                                 Body, HashFunction),
     RequestDigest = digest(HashFunction, Request),
     RequestType = <<"aws4_request">>,
     CredScope = credential_scope(ShortDate, Region, Scope, RequestType),
     StringToSign = string_to_sign(HashFunction, LongDate, CredScope,
-				  RequestDigest),
+                                  RequestDigest),
     SigningKey = signing_key(HashFunction, SecretAccessKey, ShortDate,
-			     Region, Scope, RequestType),
+                             Region, Scope, RequestType),
     Signature = sign(HashFunction, SigningKey, StringToSign),
     Authorization = authorization(HashFunction, AccessKeyId, CredScope,
-				  SignedHeaders, Signature),
+                                  SignedHeaders, Signature),
     add_authorization_header(Authorization, StampedHeaders).
 
 stamp_headers(Date, Headers) ->
@@ -32,7 +32,7 @@ add_authorization_header(Authorization, Headers) ->
     [{<<"authorization">>, Authorization} | Headers].
 
 canonical_request(Method, Uri, QueryString, CanonicalHeaders,
-		  SignedHeaders, Body, HashFunction) ->
+                  SignedHeaders, Body, HashFunction) ->
     CanonicalURI = Uri,
     CanonicalQueryString = canonical_query_string(QueryString),
     PayloadDigest = digest(HashFunction, Body),
@@ -96,7 +96,7 @@ credential_scope(ShortDate, Region, Scope, RequestType) ->
     iolist_to_binary(join(Parts, <<"/">>)).
 
 signing_key(HashFunction, SecretAccessKey, ShortDate,
-	    Region, Scope, RequestType) ->
+            Region, Scope, RequestType) ->
     Hash = hmac_fun(HashFunction),
     Key = <<"AWS4", SecretAccessKey/binary>>,
     lists:foldl(Hash, Key, [ShortDate, Region, Scope, RequestType]).
@@ -107,7 +107,7 @@ hash_function("SHA256") ->
 hmac_fun(HashFunction) ->
     HashName = hash_function(HashFunction),
     fun(Data, Key) ->
-	    crypto:hmac(HashName, Key, Data)
+            crypto:hmac(HashName, Key, Data)
     end.
 
 sign(HashFunction, SigningKey, StringToSign) ->
@@ -115,7 +115,7 @@ sign(HashFunction, SigningKey, StringToSign) ->
     base16:encode(HMAC(StringToSign, SigningKey)).
 
 authorization(HashFunction, AccessKeyId, CredScope,
-	      SignedHeaders, Signature) ->
+              SignedHeaders, Signature) ->
     <<"AWS4-HMAC-", (list_to_binary(HashFunction))/binary,
       "Credential=", AccessKeyId/binary, "/", CredScope/binary, ", ",
       "SignedHeaders=", SignedHeaders/binary, ", ",
