@@ -25,7 +25,7 @@ request(_Protocol, Scope, Method, StaticUrl, Client, Parameters) ->
     Body = <<"">>,
     SignedHeaders = sign_headers(Scope, Method, Url,
                                  Headers, Body, Client),
-    [SignedHeaders, hackney_url:unparse_url(Url)].
+    hackney:request(Method, Url, SignedHeaders).
 
 sign_headers(_Scope, _Method, _Url, Headers, _Body, #{no_sign := true}) ->
     Headers;

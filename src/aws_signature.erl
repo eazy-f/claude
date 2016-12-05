@@ -16,14 +16,18 @@ v4(AccessKeyId, SecretAccessKey, Scope, Region,
     RequestDigest = digest(HashFunction, Request),
     RequestType = <<"aws4_request">>,
     CredScope = credential_scope(ShortDate, Region, Scope, RequestType),
-    StringToSign = string_to_sign(HashFunction, LongDate, CredScope,
+    SigningScheme = signing_scheme(HashFunction),
+    StringToSign = string_to_sign(SigningScheme, LongDate, CredScope,
                                   RequestDigest),
     SigningKey = signing_key(HashFunction, SecretAccessKey, ShortDate,
                              Region, Scope, RequestType),
     Signature = sign(HashFunction, SigningKey, StringToSign),
-    Authorization = authorization(HashFunction, AccessKeyId, CredScope,
+    Authorization = authorization(SigningScheme, AccessKeyId, CredScope,
                                   SignedHeaders, Signature),
     add_authorization_header(Authorization, StampedHeaders).
+
+signing_scheme(HashFunctionName) ->
+    <<"AWS4-HMAC-", (list_to_binary(HashFunctionName))/binary>>.
 
 stamp_headers(Date, Headers) ->
     [{<<"x-amz-date">>, Date} | Headers].
@@ -87,8 +91,8 @@ join(Elements, Separator) ->
 digest("SHA256", Data) ->
     base16:encode(crypto:hash(sha256, Data)).
 
-string_to_sign(HashFunction, LongDate, CredScope, Request) ->
-    Parts = [HashFunction, LongDate, CredScope, Request],
+string_to_sign(SigningScheme, LongDate, CredScope, Request) ->
+    Parts = [SigningScheme, LongDate, CredScope, Request],
     iolist_to_binary(join(Parts, <<"\n">>)).
 
 credential_scope(ShortDate, Region, Scope, RequestType) ->
@@ -114,9 +118,9 @@ sign(HashFunction, SigningKey, StringToSign) ->
     HMAC = hmac_fun(HashFunction),
     base16:encode(HMAC(StringToSign, SigningKey)).
 
-authorization(HashFunction, AccessKeyId, CredScope,
+authorization(SigningScheme, AccessKeyId, CredScope,
               SignedHeaders, Signature) ->
-    <<"AWS4-HMAC-", (list_to_binary(HashFunction))/binary,
+    <<SigningScheme/binary, " ",
       "Credential=", AccessKeyId/binary, "/", CredScope/binary, ", ",
       "SignedHeaders=", SignedHeaders/binary, ", ",
       "Signature=", Signature/binary>>.
