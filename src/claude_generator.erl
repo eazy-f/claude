@@ -82,12 +82,14 @@ operation_function(Operation, Metadata, Shapes) ->
         <<"requestUri">> := Uri
     }} = Operation,
     #{<<"protocol">> := Protocol,
-      <<"endpointPrefix">> := EndpointPrefix} = Metadata,
+      <<"endpointPrefix">> := EndpointPrefix,
+      <<"apiVersion">> := Version} = Metadata,
     FunctionName = erl_syntax:atom(list_to_atom(claude_name(Name))),
     ParsedUri = hackney_url:parse_url(<<"http://example.com", Uri/binary>>),
     UriParameters = maps:from_list(hackney_url:parse_qs(ParsedUri#hackney_url.qs)),
     UriPath = ParsedUri#hackney_url.path,
-    StaticParameters = UriParameters#{<<"Action">> => {value, Name}},
+    StaticParameters = UriParameters#{<<"Action">> => {value, Name},
+				      <<"Version">> => {value, Version}},
     Scope = maps:get(<<"signingName">>, Metadata, EndpointPrefix),
     Args = [erl_syntax:variable('Client'), erl_syntax:variable('Parameters')],
     GetUrl = erl_syntax:application(
