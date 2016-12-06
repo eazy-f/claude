@@ -25,7 +25,12 @@ request(_Protocol, Scope, Method, StaticUrl, Client, Parameters) ->
     Body = <<"">>,
     SignedHeaders = sign_headers(Scope, Method, Url,
                                  Headers, Body, Client),
-    hackney:request(Method, Url, SignedHeaders).
+    Response = hackney:request(Method, Url, SignedHeaders),
+    case Response of
+        {ok, ResponseCode, ResponseHeaders, ClientRef} ->
+            {ok, ResponseBody} = hackney:body(ClientRef),
+            binary_to_list(ResponseBody)
+    end.
 
 sign_headers(_Scope, _Method, _Url, Headers, _Body, #{no_sign := true}) ->
     Headers;

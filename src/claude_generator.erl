@@ -54,7 +54,7 @@ operation_functions(#{<<"operations">> := Operations} = ApiDefinitions) ->
 
 claude_name(CamelCaseBin) ->
     Words = camel_parts(binary_to_list(CamelCaseBin)),
-    string:join(Words, "_").
+    list_to_atom(string:join(Words, "_")).
 
 camel_parts(CamelString) ->
     camel_parts(CamelString, []).
@@ -84,13 +84,14 @@ operation_function(Operation, Metadata, Shapes) ->
     #{<<"protocol">> := Protocol,
       <<"endpointPrefix">> := EndpointPrefix,
       <<"apiVersion">> := Version} = Metadata,
-    FunctionName = erl_syntax:atom(list_to_atom(claude_name(Name))),
+    FunctionName = erl_syntax:atom(claude_name(Name)),
     ParsedUri = hackney_url:parse_url(<<"http://example.com", Uri/binary>>),
     UriParameters = maps:from_list(hackney_url:parse_qs(ParsedUri#hackney_url.qs)),
     UriPath = ParsedUri#hackney_url.path,
     StaticParameters = UriParameters#{<<"Action">> => {value, Name},
-				      <<"Version">> => {value, Version}},
+                                      <<"Version">> => {value, Version}},
     Scope = maps:get(<<"signingName">>, Metadata, EndpointPrefix),
+    StartingLocation = <<Name/binary, "Response">>,
     Args = [erl_syntax:variable('Client'), erl_syntax:variable('Parameters')],
     GetUrl = erl_syntax:application(
               erl_syntax:atom(claude_client),
@@ -126,8 +127,151 @@ operation_function(Operation, Metadata, Shapes) ->
                        erl_syntax:atom(merge),
                        [erl_syntax:variable('ParsedParameters'),
                         erl_syntax:abstract(StaticParameters)])),
-                    CallClient],
+                    erl_syntax:match_expr(
+                      erl_syntax:variable('Response'),
+                      CallClient),
+                    erl_syntax:match_expr(
+                      erl_syntax:variable('OutputParser'),
+                      output_parser_function(StartingLocation, Output,
+                                             Shapes)),
+                    erl_syntax:application(
+                      erl_syntax:variable('OutputParser'),
+                      [erl_syntax:variable('Response')])],
     erl_syntax:function(FunctionName, [erl_syntax:clause(Args, none, FunctionBody)]).
+
+output_parser_function(_StartingLocation, undefined, _Shapes) ->
+    erl_syntax:fun_expr(
+      [erl_syntax:clause(
+         [erl_syntax:variable('_')],
+         none,
+         [erl_syntax:atom(ok)])]);
+output_parser_function(StartingLocation, OutputShape, Shapes) ->
+    EventFun = erl_syntax:fun_expr(
+                 output_parsing_event_fun_clauses(StartingLocation,
+                                                  OutputShape,
+                                                  Shapes)),
+    erl_syntax:fun_expr(
+      [erl_syntax:clause(
+         [erl_syntax:variable('Input')],
+         none,
+
+         [erl_syntax:application(
+           erl_syntax:atom(erlsom),
+           erl_syntax:atom(parse_sax),
+           [erl_syntax:variable('Input'),
+            erl_syntax:abstract([]),
+            EventFun])])]).
+
+output_parsing_event_fun_clauses(Location, OutputShape, Shapes) ->
+    PassClause = erl_syntax:clause(
+                   [erl_syntax:variable('_'),
+                    erl_syntax:variable('Acc')],
+                   none,
+                   [erl_syntax:variable('Acc')]),
+    CharactersClause = erl_syntax:clause(
+                         [erl_syntax:tuple(
+                            [erl_syntax:atom(characters),
+                             erl_syntax:variable('Chars')]),
+                          erl_syntax:list(
+                            [erl_syntax:variable('Converter')],
+                            erl_syntax:variable('Acc'))],
+                         [erl_syntax:application(
+                            erl_syntax:atom(is_function),
+                            [erl_syntax:variable('Converter')])],
+                         [erl_syntax:list(
+                            [erl_syntax:application(
+                               erl_syntax:variable('Converter'),
+                               [erl_syntax:variable('Chars')])],
+                            erl_syntax:variable('Acc'))]),
+    Clauses = [CharactersClause, PassClause],
+    output_parsing_event_fun_clauses(Location, OutputShape, Shapes, Clauses).
+
+output_parsing_event_fun_clauses(Location, OutputShape, Shapes, Acc) ->
+    #{<<"shape">> := ShapeName} = OutputShape,
+    {ok, Shape} = maps:find(ShapeName, Shapes),
+    #{<<"type">> := ShapeType} = Shape,
+    case ShapeType of
+        <<"structure">> ->
+            #{<<"members">> := Members} = Shape,
+            Start = erl_syntax:clause(
+                      [erlsom_start_element(Location),
+                       erl_syntax:variable('Acc')],
+                      none,
+                      [erl_syntax:list(
+                         [erl_syntax:abstract(#{})],
+                         erl_syntax:variable('Acc'))]),
+            Folder = output_parsing_event_fun_structure_folder(Shapes),
+            maps:fold(Folder, [Start | Acc], Members);
+        <<"list">> ->
+            #{<<"member">> := Member} = Shape,
+            MemberLocation = maps:get(<<"locationName">>, Member, <<"item">>),
+            Start = erl_syntax:clause(
+                      [erlsom_start_element(Location),
+                       erl_syntax:variable('Acc')],
+                      none,
+                      [erl_syntax:list(
+                         [erl_syntax:abstract([])],
+                         erl_syntax:variable('Acc'))]),
+            Element = erl_syntax:clause(
+                        [erlsom_end_element(MemberLocation),
+                         erl_syntax:list(
+                           [erl_syntax:variable('Child'),
+                            erl_syntax:variable('Parent')],
+                           erl_syntax:variable('Acc'))],
+                        none,
+                        [erl_syntax:list(
+                           [erl_syntax:list(
+                              [erl_syntax:variable('Child')],
+                              erl_syntax:variable('Parent'))],
+                           erl_syntax:variable('Acc'))]),
+            output_parsing_event_fun_clauses(MemberLocation, Member,
+                                             Shapes, [Start, Element | Acc]);
+        _ ->
+            Start = erl_syntax:clause(
+                      [erlsom_start_element(Location),
+                       erl_syntax:variable('Acc')],
+                      none,
+                      [erl_syntax:list(
+                         [id_fun()],
+                         erl_syntax:variable('Acc'))]),
+            [Start | Acc]
+    end.
+
+output_parsing_event_fun_structure_folder(Shapes) ->
+    fun(Name, Type, Clauses) ->
+            Location = maps:get(<<"locationName">>, Type, Name),
+            End = erl_syntax:clause(
+                    [erlsom_end_element(Location),
+                     erl_syntax:list(
+                       [erl_syntax:variable('Child'),
+                        erl_syntax:variable('Parent')],
+                       erl_syntax:variable('Acc'))],
+                    none,
+                    [erl_syntax:list(
+                       [erl_syntax:map_expr(
+                          erl_syntax:variable('Parent'),
+                          [erl_syntax:map_field_assoc(
+                             erl_syntax:abstract(claude_name(Name)),
+                             erl_syntax:variable('Child'))])],
+                       erl_syntax:variable('Acc'))]),
+            output_parsing_event_fun_clauses(Location, Type,
+                                             Shapes, [End | Clauses])
+    end.
+
+erlsom_start_element(Location) ->
+    erl_syntax:tuple(
+     [erl_syntax:atom(startElement),
+      erl_syntax:variable('_'),
+      erl_syntax:abstract(binary_to_list(Location)),
+      erl_syntax:variable('_'),
+      erl_syntax:variable('_')]).
+
+erlsom_end_element(Location) ->
+    erl_syntax:tuple(
+     [erl_syntax:atom(endElement),
+      erl_syntax:variable('_'),
+      erl_syntax:abstract(binary_to_list(Location)),
+      erl_syntax:variable('_')]).
 
 exports(ExportedFunctions) ->
     ExportList = [erl_syntax:arity_qualifier(erl_syntax:function_name(Fun),
@@ -238,7 +382,7 @@ parameter_parser_clause(Name, Definition, Shapes) ->
     [ValuePattern] = erl_syntax:clause_patterns(Clause),
     Key = struct_member_key(Name, Definition),
     erl_syntax:clause(
-      [erl_syntax:abstract(list_to_atom(claude_name(Name))),
+      [erl_syntax:abstract(claude_name(Name)),
        ValuePattern,
        erl_syntax:variable('Acc')],
       erl_syntax:clause_guard(Clause),
@@ -260,3 +404,10 @@ binary_concat(BinaryList) ->
     Forms = [erl_syntax:binary_field(Body, [erl_syntax:atom(binary)]) 
              || Body <- BinaryList],
     erl_syntax:binary(Forms).
+
+id_fun() ->
+    erl_syntax:fun_expr(
+      [erl_syntax:clause(
+         [erl_syntax:variable('Val')],
+         none,
+         [erl_syntax:variable('Val')])]).
